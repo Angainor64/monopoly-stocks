@@ -3,10 +3,12 @@ from typing import Dict, List, Iterable
 
 
 class Player:
-    def __init__(self, name: str, start_cash: int):
+    def __init__(self, name: str, start_cash: int, position: "Space"):
         self.name = name
         self.cash = start_cash
         self.portfolio: Dict[Purchasable, int] = {}
+        self.has_jail_free_card = False
+        self.position = position
 
     def __hash__(self):
         return hash(self.name)
@@ -47,24 +49,18 @@ class Player:
 
 
 class Space(ABC):
-    def __init__(self, name: str, prev_space: "Space" = None, next_space: "Space" = None):
+    def __init__(self, name: str, board: "Board", prev_space: "Space" = None, next_space: "Space" = None):
         self.name = name
         self.num_players: int = 0
+        self.board = board
         self.prev = prev_space
         self.next = next_space
-
-    @abstractmethod
-    def get_action(self):
-        """
-        The action that must be taken by the player when landing on this space
-        :return: Uhhhhh... an "Action" object, maybe? I'll figure this out later
-        """
-        ...
+        self.residents: List[Player] = []
 
 
 class Purchasable(ABC, Space):
-    def __init__(self, name: str, company: "Company", total_stock_value: int, prev_space: Space = None, next_space: Space = None):
-        super(Purchasable, self).__init__(name, prev_space, next_space)
+    def __init__(self, name: str, company: "Company", total_stock_value: int, board: "Board", prev_space: Space = None, next_space: Space = None):
+        super(Purchasable, self).__init__(name, board, prev_space, next_space)
         self.total_stock_value = total_stock_value
         self.owners: Dict[Player, int] = {}
         self.unowned_stock: int = 100
@@ -123,8 +119,8 @@ class Purchasable(ABC, Space):
 
 
 class Property(Purchasable):
-    def __init__(self, name: str, company: "Company", total_stock_value: int, rent_prices: List[int], prev_space: Space = None, next_space: Space = None):
-        super(Property, self).__init__(name, company, total_stock_value, prev_space, next_space)
+    def __init__(self, name: str, company: "Company", total_stock_value: int, rent_prices: List[int], board: "Board", prev_space: Space = None, next_space: Space = None):
+        super(Property, self).__init__(name, company, total_stock_value, board, prev_space, next_space)
         self.num_houses = 0
         self.rent_array = rent_prices
 
@@ -138,6 +134,55 @@ class Property(Purchasable):
         self.owners = {}
         self.unowned_stock = 100
 
+
+class Railroad(Purchasable):
+    def __init__(self, name: str, company: "Company", total_stock_value: int, rent_prices: List[int], board: "Board", prev_space: Space = None, next_space: Space = None):
+        super(Railroad, self).__init__(name, company, total_stock_value, board, prev_space, next_space)
+        self.rent_array = rent_prices
+        self.majority_owner: Player | None = None
+
+    def get_rent(self) -> int:
+        count = 1
+        if self.majority_owner is not None:
+            count = sum((asset.majority_owner == self.majority_owner for asset in self.company.assets))
+        return self.rent_array[count]
+
+    def foreclose(self) -> None:
+        self.majority_owner = None
+        self.owners = {}
+        self.unowned_stock = 100
+
+    def cleanup(self) -> None:
+        super(Railroad, self).cleanup()
+        for owner in self.owners:
+            if self.owners[owner] > 50:
+                self.majority_owner = owner
+                break
+
+
+class Utility(Purchasable):
+    def __init__(self, name: str, company: "Company", total_stock_value: int, rent_multipliers: List[int], board: "Board", prev_space: Space = None, next_space: Space = None):
+        super(Utility, self).__init__(name, company, total_stock_value, board, prev_space, next_space)
+        self.rent_mult = rent_multipliers
+        self.majority_owner: Player | None = None
+
+    def get_rent(self, roll: int) -> int:
+        count = 1
+        if self.majority_owner is not None:
+            count = sum((asset.majority_owner == self.majority_owner for asset in self.company.assets))
+        return self.rent_mult[count] * roll
+
+    def foreclose(self) -> None:
+        self.majority_owner = None
+        self.owners = {}
+        self.unowned_stock = 100
+
+    def cleanup(self) -> None:
+        super(Utility, self).cleanup()
+        for owner in self.owners:
+            if self.owners[owner] > 50:
+                self.majority_owner = owner
+                break
 
 
 class Company:
@@ -175,3 +220,100 @@ class Company:
         self.owners = {}
         for asset in self.assets:
             asset.foreclose()
+
+
+class ActionSpace(ABC, Space):
+    def __init__(self, name: str, board: "Board", prev_space: Space = None, next_space: Space = None):
+        super(ActionSpace, self).__init__(name, board, prev_space, next_space)
+
+    @abstractmethod
+    @property
+    def pass_action(self) -> bool:
+        ...
+
+    @abstractmethod
+    def do_action(self, player: Player) -> None:
+        ...
+
+
+class GoSpace(Space):
+    def __init__(self, board: "Board", prev_space: Space = None, next_space: Space = None):
+        super(GoSpace, self).__init__("GO", board, prev_space, next_space)
+
+    @property
+    def pass_action(self) -> bool:
+        return True
+
+    @staticmethod
+    def do_action(player: Player) -> None:
+        player.cash += 200
+
+
+class ChanceSpace(Space):
+    def __init__(self, board: "Board", prev_space: Space = None, next_space: Space = None):
+        super(ChanceSpace, self).__init__("CHANCE", board, prev_space, next_space)
+
+    @property
+    def pass_action(self) -> bool:
+        return False
+
+    def do_action(self, player: Player) -> None:
+        self.board.draw_chance(player)
+
+
+class CommunityChestSpace(Space):
+    def __init__(self, board: "Board", prev_space: Space = None, next_space: Space = None):
+        super(CommunityChestSpace, self).__init__("COMMUNITY CHEST", board, prev_space, next_space)
+
+    @property
+    def pass_action(self) -> bool:
+        return False
+
+    def do_action(self, player: Player) -> None:
+        self.board.draw_community_chest(player)
+
+
+class TaxSpace(Space):
+    def __init__(self, name: str, tax_amount: List[int | float], board: "Board", prev_space: Space = None, next_space: Space = None):
+        super(TaxSpace, self).__init__(name, board, prev_space, next_space)
+        self.amount_array = tax_amount
+
+    @property
+    def pass_action(self) -> bool:
+        return True
+
+    def do_action(self, player: Player) -> None:
+        poss_payments = []
+        for amount in self.amount_array:
+            if type(amount) == int:
+                poss_payments.append(amount)
+                continue
+            poss_payments.append(amount * player.cash)
+        final_tax_amount = min(poss_payments)
+        player.cash -= final_tax_amount
+        self.board.free_parking.cash += final_tax_amount
+
+
+class JailSpace(Space):
+    def __init__(self, board: "Board", next_space: Space = None):
+        super(JailSpace, self).__init__("JAIL", board, None, next_space)
+
+
+class FreeParkingSpace(ActionSpace):
+    def __init__(self, board: "Board", prev_space: Space = None, next_space: Space = None):
+        super(FreeParkingSpace, self).__init__("FREE PARKING", board, prev_space, next_space)
+        self.cash = 0
+
+    @property
+    def pass_action(self, player: Player) -> bool:
+        return False
+
+    def do_action(self, player: Player) -> None:
+        player.cash += self.cash
+        self.cash = 0
+
+
+class GoToJailSpace(ActionSpace):
+    def __init__(self, jail_space: JailSpace, board: "Board", prev_space: Space = None, next_space: Space = None):
+        super(GoToJailSpace, self).__init__("GO TO JAIL", board, prev_space, next_space)
+        self.jail_space = jail_space
